@@ -1,0 +1,24 @@
+pv_master_wechsel_abschluss:
+  alias: "PV Master-Wechsel: Abschluss & Info"
+  description: "Aktualisiert den Zeitstempel und sendet eine Benachrichtigung."
+  fields:
+    wechsel_grund:
+      description: "Der Grund für den Wechsel (z.B. SOC Hysterese oder 7-Tage-Rotation)"
+      example: "SOC Hysterese"
+  sequence:
+    # 1. Zeitstempel aktualisieren
+    - action: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.letzter_master_wechsel
+      data:
+        datetime: "{{ now().isoformat() }}"
+
+    # 2. Benachrichtigung senden
+    - action: notify.mobile_app_motorola_edge_60
+      data:
+        title: "🔋 PV-Speicher Master-Wechsel"
+        message: >
+          Der Master wurde soeben gewechselt.
+          Neuer Master: {{ 'Varta (A)' if is_state('input_boolean.pv_batterie_a_master', 'on') else 'Marstek (B)' }}
+          Grund: {{ wechsel_grund }}
+          Zeit: {{ now().strftime('%H:%M:%S') }}
