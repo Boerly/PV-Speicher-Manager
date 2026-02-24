@@ -1,0 +1,216 @@
+alias: "PV Speicher: Master-Manager 2.7.0 sim (Smart & Stabil)"
+description: >
+  Optimierte Master-Steuerung mit Netzfluss-Trigger,
+  Anti-Ping-Pong, SOC-Differenzprüfung und sinnvoller Rotation.
+
+mode: restart
+max_exceeded: silent
+
+############################################################
+# TRIGGER
+############################################################
+triggers:
+  - id: varta_voll
+    trigger: numeric_state
+    entity_id: sensor.varta_batterie_ladezustand
+    above: 95
+    for: "00:02:00"
+
+  - id: marstek_voll
+    trigger: numeric_state
+    entity_id: sensor.marstek_venus_modbus_batterie_ladezustand
+    above: 95
+    for: "00:02:00"
+
+  - id: varta_leer
+    trigger: numeric_state
+    entity_id: sensor.varta_batterie_ladezustand
+    below: 5
+    for: "00:02:00"
+
+  - id: marstek_leer
+    trigger: numeric_state
+    entity_id: sensor.marstek_venus_modbus_batterie_ladezustand
+    below: 13
+    for: "00:02:00"
+
+  # Netzfluss Trigger
+  - id: power_bezug
+    trigger: numeric_state
+    entity_id: sensor.power_total
+    above: 150
+    for: "00:01:00"
+
+  - id: power_einspeisung
+    trigger: numeric_state
+    entity_id: sensor.power_total
+    below: -150
+    for: "00:01:00"
+
+  - id: rotation_check
+    trigger: time
+    at: "00:00:00"
+
+############################################################
+# CONDITIONS
+############################################################
+conditions:
+  - condition: state
+    entity_id: input_boolean.pv_batterie_umschaltung_gesperrt
+    state: "off"
+
+############################################################
+# ACTIONS
+############################################################
+actions:
+
+  - action: input_boolean.turn_on
+    target:
+      entity_id: input_boolean.pv_batterie_umschaltung_gesperrt
+
+  ##########################################################
+  # VARIABLEN
+  ##########################################################
+  - variables:
+      soc_varta: "{{ states('sensor.varta_batterie_ladezustand') | int(0) }}"
+      soc_marstek: "{{ states('sensor.marstek_venus_modbus_batterie_ladezustand') | int(0) }}"
+      power_total: "{{ states('sensor.power_total') | int(0) }}"
+
+      last_switch: "{{ states('input_datetime.letzter_master_wechsel') }}"
+
+      anti_ping_pong_ok: >
+        {{ last_switch in ['unknown','unavailable'] or
+           (as_timestamp(now()) - as_timestamp(last_switch,0)) > 1800 }}
+
+      soc_diff: "{{ (soc_varta - soc_marstek) | abs }}"
+
+      neuer_master: >
+        {% set current_is_varta = is_state('input_boolean.pv_batterie_a_master', 'on') %}
+
+        {# LADEN #}
+        {% if power_total < netz_einspeisung_limit and anti_ping_pong_ok %}
+
+          {% if current_is_varta and soc_varta >= varta_soc_voll
+                and soc_marstek <= (marstek_soc_voll - 5)
+                and soc_diff >= 5 %}
+            B
+          {% elif not current_is_varta and soc_marstek >= marstek_soc_voll
+                and soc_varta <= (varta_soc_voll - 5)
+                and soc_diff >= 5 %}
+            A
+          {% else %}
+            none
+          {% endif %}
+
+        {# ENTLADEN #}
+        {% elif power_total > netz_bezug_limit and anti_ping_pong_ok %}
+
+          {% if current_is_varta and soc_varta <= varta_soc_leer
+                and soc_marstek > marstek_soc_min
+                and soc_diff >= 5 %}
+            B
+          {% elif not current_is_varta and soc_marstek <= marstek_soc_leer
+                and soc_varta > varta_soc_min
+                and soc_diff >= 5 %}
+            A
+          {% else %}
+            none
+          {% endif %}
+
+        {% else %}
+          none
+        {% endif %}
+
+  ##########################################################
+  # DEBUG
+  ##########################################################
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.pv_master_debug
+    data:
+      value: |
+        Trigger: {{ trigger.id }}
+        neuer_master: {{ neuer_master }}
+        SOC Varta: {{ soc_varta }}
+        SOC Marstek: {{ soc_marstek }}
+        SOC Differenz: {{ soc_diff }}
+        Netzleistung: {{ power_total }}
+        Anti-Ping-Pong OK: {{ anti_ping_pong_ok }}
+
+  ##########################################################
+  # MASTER WECHSEL
+  ##########################################################
+  - choose:
+      - alias: Master-Wechsel durchführen
+        conditions:
+          - condition: template
+            value_template: "{{ neuer_master != 'none' }}"
+        sequence:
+          - action: script.pv_master_wechsel
+            data:
+              neuer_master: "{{ neuer_master }}"
+
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.letzter_master_wechsel
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
+
+          - action: script.benachrichtigung_an_handy_senden
+            data:
+              title: "🔋 PV Master gewechselt"
+              message: >
+                Neuer Master: {{ 'Varta (A)' if neuer_master == 'A' else 'Marstek (B)' }}
+                SOC Varta: {{ soc_varta }}%
+                SOC Marstek: {{ soc_marstek }}%
+                Netzleistung: {{ power_total }}W
+
+      ######################################################
+      # ROTATION (nur wenn beide im ähnlichen Bereich)
+      ######################################################
+      - alias: Rotation
+        conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'rotation_check' }}"
+          - condition: template
+            value_template: >
+              {{ (as_timestamp(now()) -
+                  as_timestamp(states('input_datetime.letzter_master_wechsel'),0))
+                 > (7*24*60*60) }}
+          - condition: template
+            value_template: >
+              {{ (soc_varta > 60 and soc_marstek > 60)
+                 or (soc_varta < 40 and soc_marstek < 40) }}
+        sequence:
+          - action: script.pv_master_wechsel
+            data:
+              neuer_master: >
+                {{ 'B' if is_state('input_boolean.pv_batterie_a_master','on')
+                   else 'A' }}
+
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.letzter_master_wechsel
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
+
+  - delay: "00:00:03"
+
+  - action: input_boolean.turn_off
+    target:
+      entity_id: input_boolean.pv_batterie_umschaltung_gesperrt
+
+############################################################
+# SYSTEM VARIABLEN
+############################################################
+variables:
+  varta_soc_voll: 95
+  varta_soc_leer: 5
+  varta_soc_min: 50
+
+  marstek_soc_voll: 95
+  marstek_soc_leer: 13
+  marstek_soc_min: 50
+
+  netz_einspeisung_limit: -150
+  netz_bezug_limit: 150
