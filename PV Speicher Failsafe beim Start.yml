@@ -1,0 +1,28 @@
+alias: PV Speicher Failsafe beim Start (optimiert)
+description: >-
+  Initialer Startzustand: Setzt alle Sperren zurück und aktiviert dann den
+  sicheren Master-Modus für Varta.
+mode: single
+triggers:
+  - trigger: homeassistant
+    event: start
+actions:
+  - alias: "Schritt 1: Reset - Alle Booleans auf OFF (Bereinigung)"
+    action: input_boolean.turn_off
+    target:
+      entity_id:
+        - input_boolean.varta_speicher_charge
+        - input_boolean.varta_speicher_discharge
+        - input_boolean.marstek_speicher_charge
+        - input_boolean.marstek_speicher_discharge
+        - input_boolean.pv_batterie_umschaltung_gesperrt
+
+  - delay: "00:00:05"
+
+  - alias: "Schritt 2: Set - Master EIN und Varta Sperren setzen"
+    action: input_boolean.turn_on
+    target:
+      entity_id:
+        - input_boolean.pv_batterie_a_master
+        - input_boolean.varta_speicher_charge
+        - input_boolean.varta_speicher_discharge
